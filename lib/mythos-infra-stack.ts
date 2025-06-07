@@ -7,17 +7,26 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
 
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-import * as ecr from "aws-cdk-lib/aws-ecr";
+
+// import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+// import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
+
+import { CfnOutput } from "aws-cdk-lib";
+
+import * as route53 from "aws-cdk-lib/aws-route53";
 
 const POSTGRES_PORT = 5432;
 
 export class MythosInfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+
+    const hostedZone = new route53.HostedZone(this, "MythosHostedZone", {
+      zoneName: "mythosapp.io",
+    });
 
     const vpc = new ec2.Vpc(this, "MythosVpc", {
       maxAzs: 2,
@@ -95,6 +104,16 @@ export class MythosInfraStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Be careful with this in production
     });
 
+    const githubUser = new iam.User(this, "GithubActionsUser", {
+      userName: "github-actions-mythos-deploy",
+    });
+
+    frontendBucket.grantReadWrite(githubUser);
+
+    const accessKey = new iam.CfnAccessKey(this, "GithubDeployAccessKey", {
+      userName: githubUser.userName,
+    });
+
     // Origin Access Control for CloudFront
     const oac = new cloudfront.S3OriginAccessControl(this, "MythosOAC", {
       description: "OAC for Mythos frontend bucket",
@@ -127,6 +146,19 @@ export class MythosInfraStack extends cdk.Stack {
         priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
       },
     );
+
+    githubUser.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudfront:CreateInvalidation"],
+        resources: [
+          `arn:aws:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
+        ],
+      }),
+    );
+
+    new CfnOutput(this, "CloudFrontDistributionId", {
+      value: distribution.distributionId,
+    });
 
     // The code that defines your stack goes here
 
