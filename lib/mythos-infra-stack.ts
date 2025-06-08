@@ -161,7 +161,7 @@ export class MythosInfraStack extends cdk.Stack {
       zone,
       recordName: "mythosapp.io",
       target: route53.RecordTarget.fromAlias(
-        new targets.CloudfrontTarget(distribution),
+        new targets.CloudFrontTarget(distribution),
       ),
     });
 
