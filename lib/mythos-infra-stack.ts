@@ -13,6 +13,8 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 
+import * as certificatemanager from "aws-cdk-lib/aws-certificatemanager";
+
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
@@ -23,18 +25,25 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 
 const POSTGRES_PORT = 5432;
 
+interface MythosInfraStackProps extends cdk.StackProps {
+  certificateArn: string;
+}
+
 export class MythosInfraStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props: MythosInfraStackProps) {
     super(scope, id, props);
+
+    const certificateArn = props.certificateArn;
 
     const zone = route53.HostedZone.fromLookup(this, "MythosZone", {
       domainName: "mythosapp.io",
     });
 
-    const cert = new acm.Certificate(this, "MythosCert", {
-      domainName: "mythosapp.io",
-      validation: acm.CertificateValidation.fromDns(zone),
-    });
+    const certificate = certificatemanager.Certificate.fromCertificateArn(
+      this,
+      "ImportedCert",
+      certificateArn,
+    );
 
     const vpc = new ec2.Vpc(this, "MythosVpc", {
       maxAzs: 2,
@@ -131,15 +140,15 @@ export class MythosInfraStack extends cdk.Stack {
       this,
       "MythosDistribution",
       {
-        certificate: cert,
-        domainNames: ["mythosapp.io"],
         defaultBehavior: {
-          origin:
-            origins.S3BucketOrigin.withOriginAccessControl(frontendBucket),
+          origin: new origins.S3Origin(frontendBucket),
           viewerProtocolPolicy:
             cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
         },
+        certificate: certificate,
+        domainNames: ["mythosapp.io", "www.mythosapp.io"],
+        sslSupportMethod: cloudfront.SSLMethod.SNI,
+        minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
         defaultRootObject: "index.html",
         errorResponses: [
           {
@@ -153,7 +162,6 @@ export class MythosInfraStack extends cdk.Stack {
             responsePagePath: "/index.html",
           },
         ],
-        priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
       },
     );
 
