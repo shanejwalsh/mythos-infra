@@ -6,47 +6,57 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
 
+import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
+
 import * as iam from "aws-cdk-lib/aws-iam";
 
-// import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-// import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 
-import * as certificatemanager from "aws-cdk-lib/aws-certificatemanager";
+import * as elbv2Targets from "aws-cdk-lib/aws-elasticloadbalancingv2-targets";
 
-import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as certificatemanager from "aws-cdk-lib/aws-certificatemanager";
 
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 
-import { CfnOutput } from "aws-cdk-lib";
+import * as apigatewayv2Alpha from "@aws-cdk/aws-apigatewayv2-alpha";
+import * as integrationsAlpha from "@aws-cdk/aws-apigatewayv2-integrations-alpha";
 
 import * as route53 from "aws-cdk-lib/aws-route53";
 
 const POSTGRES_PORT = 5432;
 
-interface MythosInfraStackProps extends cdk.StackProps {
-  certificateArn: string;
-}
-
 export class MythosInfraStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: MythosInfraStackProps) {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const certificateArn = props.certificateArn;
-
-    const zone = route53.HostedZone.fromLookup(this, "MythosZone", {
-      domainName: "mythosapp.io",
-    });
-
-    const certificate = certificatemanager.Certificate.fromCertificateArn(
+    const hostedZone = route53.HostedZone.fromHostedZoneAttributes(
       this,
-      "ImportedCert",
-      certificateArn,
+      "HostedZone",
+      {
+        hostedZoneId: "Z05443627IDGMCDOHGJK",
+        zoneName: "mythosapp.io",
+      },
+    );
+
+    const certificate = new certificatemanager.Certificate(
+      this,
+      "MythosWildcardCert",
+      {
+        domainName: "mythosapp.io",
+        subjectAlternativeNames: ["www.mythosapp.io", "*.mythosapp.io"],
+        validation:
+          certificatemanager.CertificateValidation.fromDns(hostedZone),
+      },
     );
 
     const vpc = new ec2.Vpc(this, "MythosVpc", {
       maxAzs: 2,
+    });
+
+    const nlb = new elbv2.NetworkLoadBalancer(this, "MythosNLB", {
+      vpc,
+      internetFacing: true,
     });
 
     const dbInstance = new rds.DatabaseInstance(this, "MythosPostgres", {
@@ -66,6 +76,9 @@ export class MythosInfraStack extends cdk.Stack {
       },
       publiclyAccessible: false,
       multiAz: false,
+      deletionProtection: false,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      deleteAutomatedBackups: true,
     });
 
     const ec2Sg = new ec2.SecurityGroup(this, "MythosEc2SG", {
@@ -105,43 +118,99 @@ export class MythosInfraStack extends cdk.Stack {
       machineImage: ec2.MachineImage.latestAmazonLinux(),
       securityGroup: ec2Sg,
       role: instanceRole,
-      keyName: "mythos-keypair", // ✅ replace with a real EC2 key pair name
+      keyName: "mythos-keypair",
       vpcSubnets: {
-        subnetType: ec2.SubnetType.PUBLIC, // public so you can SSH in
+        subnetType: ec2.SubnetType.PUBLIC,
       },
     });
 
-    new cdk.CfnOutput(this, "EC2PublicIP", {
-      value: ec2Instance.instancePublicIp,
+    const targetGroup = new elbv2.NetworkTargetGroup(this, "RailsTargetGroup", {
+      vpc,
+      port: 80,
+      targets: [new elbv2Targets.InstanceTarget(ec2Instance)],
+    });
+
+    const listener = nlb.addListener("MythosListener", {
+      port: 80,
+      defaultTargetGroups: [targetGroup],
+    });
+
+    // nlb.addListener("RailsListener", {
+    //   port: 80,
+    //   defaultTargetGroups: [targetGroup],
+    // });
+
+    const vpcLink = new apigatewayv2Alpha.VpcLink(this, "MyVpcLink", {
+      vpc,
+      vpcLinkName: "MythosApiVpcLink",
+      subnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+      },
+      securityGroups: [ec2Sg],
+    });
+
+    const integration = new integrationsAlpha.HttpNlbIntegration(
+      "MythosNlbIntegration",
+      listener,
+      {
+        vpcLink,
+      },
+    );
+
+    const httpApi = new apigatewayv2Alpha.HttpApi(this, "MythosHttpApi", {
+      apiName: "Mythos HTTP API",
+      defaultIntegration: integration,
+    });
+
+    const domainName = new apigatewayv2Alpha.DomainName(
+      this,
+      "MythosApiDomain",
+      {
+        domainName: "api.mythosapp.io",
+        certificate: certificate,
+        endpointType: apigatewayv2Alpha.EndpointType.REGIONAL,
+      },
+    );
+
+    new apigatewayv2Alpha.ApiMapping(this, "MythosApiMapping", {
+      api: httpApi,
+      domainName,
+      stage: httpApi.defaultStage!,
+    });
+
+    new route53.ARecord(this, "ApiGatewayAliasRecord", {
+      zone: hostedZone,
+      recordName: "api.mythosapp.io",
+      target: route53.RecordTarget.fromAlias(
+        new targets.ApiGatewayv2DomainProperties(
+          domainName.regionalDomainName,
+          domainName.regionalHostedZoneId,
+        ),
+      ),
     });
 
     const frontendBucket = new s3.Bucket(this, "MythosFrontendBucket", {
-      bucketName: "mythos-frontend-bucket",
+      bucketName: "mythos-frontend",
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL, // CloudFront will access it
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Be careful with this in production
     });
 
     const githubUser = new iam.User(this, "GithubActionsUser", {
-      userName: "github-actions-mythos-deploy",
+      userName: "github-actions-deploy",
     });
-
-    frontendBucket.grantReadWrite(githubUser);
 
     const accessKey = new iam.CfnAccessKey(this, "GithubDeployAccessKey", {
       userName: githubUser.userName,
     });
 
-    // Origin Access Control for CloudFront
-    const oac = new cloudfront.S3OriginAccessControl(this, "MythosOAC", {
-      description: "OAC for Mythos frontend bucket",
-    });
+    const origin = new origins.S3Origin(frontendBucket);
 
     const distribution = new cloudfront.Distribution(
       this,
       "MythosDistribution",
       {
         defaultBehavior: {
-          origin: new origins.S3Origin(frontendBucket),
+          origin,
           viewerProtocolPolicy:
             cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         },
@@ -165,8 +234,18 @@ export class MythosInfraStack extends cdk.Stack {
       },
     );
 
+    new route53.ARecord(this, "WwwAlias", {
+      zone: hostedZone,
+      recordName: "www.mythosapp.io",
+      target: route53.RecordTarget.fromAlias(
+        new targets.CloudFrontTarget(distribution),
+      ),
+    });
+
+    distribution.node.addDependency(certificate);
+
     new route53.ARecord(this, "RootAlias", {
-      zone,
+      zone: hostedZone,
       recordName: "mythosapp.io",
       target: route53.RecordTarget.fromAlias(
         new targets.CloudFrontTarget(distribution),
@@ -182,26 +261,44 @@ export class MythosInfraStack extends cdk.Stack {
       }),
     );
 
-    new CfnOutput(this, "CloudFrontDistributionId", {
+    frontendBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ServicePrincipal("cloudfront.amazonaws.com")],
+        actions: ["s3:GetObject"],
+        resources: [`${frontendBucket.bucketArn}/*`],
+        conditions: {
+          StringEquals: {
+            "AWS:SourceArn": `arn:aws:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
+          },
+        },
+      }),
+    );
+
+    frontendBucket.grantReadWrite(githubUser);
+
+    new cdk.CfnOutput(this, "CloudFrontDistributionId", {
       value: distribution.distributionId,
     });
 
-    // The code that defines your stack goes here
-
-    // example resource
-    // const queue = new sqs.Queue(this, 'MythosInfraQueue', {
-    //   visibilityTimeout: cdk.Duration.seconds(300)
-    // });
-
-    new s3.Bucket(this, "MythosPublicImageBucket", {
-      bucketName: "mythos-public-image-bucket",
-      publicReadAccess: true,
-      blockPublicAccess: new s3.BlockPublicAccess({
-        blockPublicAcls: false,
-        blockPublicPolicy: false,
-        ignorePublicAcls: false,
-        restrictPublicBuckets: false,
-      }),
+    new cdk.CfnOutput(this, "EC2PublicIP", {
+      value: ec2Instance.instancePublicIp,
     });
+
+    new cdk.CfnOutput(this, "GithubAccessKeyId", {
+      value: accessKey.ref,
+    });
+
+    new cdk.CfnOutput(this, "GithubSecretAccessKey", {
+      value: accessKey.attrSecretAccessKey,
+    });
+
+    new cdk.CfnOutput(this, "ApiDomainCertificateArn", {
+      value: certificate.certificateArn,
+    });
+
+    // new cdk.CfnOutput(this, "MythosElasticIP", {
+    //   value: eip.ref,
+    // });
   }
 }
