@@ -135,11 +135,6 @@ export class MythosInfraStack extends cdk.Stack {
       defaultTargetGroups: [targetGroup],
     });
 
-    // nlb.addListener("RailsListener", {
-    //   port: 80,
-    //   defaultTargetGroups: [targetGroup],
-    // });
-
     const vpcLink = new apigatewayv2Alpha.VpcLink(this, "MyVpcLink", {
       vpc,
       vpcLinkName: "MythosApiVpcLink",
@@ -195,14 +190,6 @@ export class MythosInfraStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Be careful with this in production
     });
 
-    const githubUser = new iam.User(this, "GithubActionsUser", {
-      userName: "github-actions-deploy",
-    });
-
-    const accessKey = new iam.CfnAccessKey(this, "GithubDeployAccessKey", {
-      userName: githubUser.userName,
-    });
-
     const origin = new origins.S3Origin(frontendBucket);
 
     const distribution = new cloudfront.Distribution(
@@ -214,7 +201,7 @@ export class MythosInfraStack extends cdk.Stack {
           viewerProtocolPolicy:
             cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         },
-        certificate: certificate,
+        certificate,
         domainNames: ["mythosapp.io", "www.mythosapp.io"],
         sslSupportMethod: cloudfront.SSLMethod.SNI,
         minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
@@ -251,6 +238,44 @@ export class MythosInfraStack extends cdk.Stack {
         new targets.CloudFrontTarget(distribution),
       ),
     });
+
+    const githubUser = new iam.User(this, "GithubActionsUser", {
+      userName: "github-actions-deploy",
+    });
+
+    const accessKey = new iam.CfnAccessKey(this, "GithubDeployAccessKey", {
+      userName: githubUser.userName,
+    });
+
+    githubUser.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecr:GetAuthorizationToken", "ecr:CreateRepository"],
+        resources: ["*"],
+      }),
+    );
+
+    githubUser.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+          "ecr:PutImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:DescribeRepositories",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ],
+        resources: [
+          `arn:aws:ecr:us-east-1:${this.account}:repository/mythos-server`,
+        ],
+      }),
+    );
 
     githubUser.addToPolicy(
       new iam.PolicyStatement({
